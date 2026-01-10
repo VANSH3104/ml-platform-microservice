@@ -1,0 +1,30 @@
+services:
+  redis:
+    image: redis:latest
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  api-gateway:
+    container_name: api-gateway
+    build: ./api-gateway
+    ports:
+      - "3000:3000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./api-gateway:/app
+      - /app/node_modules
+    working_dir: /app
+    command: npm run dev
+volumes:
+  redis_data:
