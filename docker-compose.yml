@@ -43,6 +43,21 @@ services:
       timeout: 5s
       retries: 3
       start_period: 40s
-
+  data-processor:
+      build: ./data-processor
+      container_name: data-processor
+      ports:
+        - "3002:3002"
+      environment:
+        - REDIS_ADDR=redis:6379
+      depends_on:
+        redis:
+          condition: service_healthy
+      healthcheck:
+        test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3002/health"]
+        interval: 30s
+        timeout: 10s
+        retries: 3
+        start_period: 40s
 volumes:
   redis_data:
