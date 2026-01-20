@@ -30,7 +30,7 @@ services:
     container_name: inference-engine
     build: ./inference-engine
     ports:
-      - "4000:4000"
+      - "3001:3001"
     environment:
       - REDIS_URL=redis://redis:6379
       - RUST_LOG=info
