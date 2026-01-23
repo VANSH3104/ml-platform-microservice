@@ -4,12 +4,10 @@ const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// CRITICAL: Add JSON body parser
 app.use(express.json());
 
 const redis = new Redis(process.env.REDIS_URL || "redis://redis:6379");
 
-// Health endpoint - GOOD
 app.get('/health', async(req, res) => {
   try {
     await redis.ping();
@@ -29,7 +27,6 @@ app.get('/health', async(req, res) => {
   }
 });
 
-// Root endpoint - GOOD
 app.get('/', (req, res) => {
   res.json({
     message: 'ML Platform API Gateway',
@@ -38,12 +35,12 @@ app.get('/', (req, res) => {
       "/test-redis", 
       "/api/predict", 
       "/api/process",
-      "/api/services/status"
+      "/api/services/status",
+      "/api/requests/:requestId"
     ]
   });
 });
 
-// Redis test - GOOD
 app.get("/test-redis", async(req, res) => {
   try {
     await redis.set("testkey", "hello its running");
@@ -62,22 +59,20 @@ app.get("/test-redis", async(req, res) => {
   }
 });
 
-// 🔴 FIXED: Rust inference endpoint
 app.post("/api/infer", async (req, res) => {
   const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   
   try {
-    console.log(`📥 [${requestId}] Inference request received`);
+    console.log(`[${requestId}] Inference request received`);
     
-    // FIX: Use service name, not localhost
     const response = await axios.post(
-      "http://inference-engine:3001/infer",  // CHANGED FROM localhost:4000
+      "http://inference-engine:3001/infer",
       {
         ...req.body,
         request_id: requestId
       },
       {
-        timeout: 10000,  // Increased from 1000ms
+        timeout: 10000,
         headers: {
           "Content-Type": "application/json",
           "X-Request-ID": requestId
@@ -102,7 +97,7 @@ app.post("/api/infer", async (req, res) => {
     });
     
   } catch (error) {
-    console.error(`❌ [${requestId}] Inference error:`, error.message);
+    console.error(`[${requestId}] Inference error:`, error.message);
     
     res.status(500).json({
       error: "Inference engine failed",
@@ -113,10 +108,9 @@ app.post("/api/infer", async (req, res) => {
   }
 });
 
-// 🔴 FIXED: Rust service check endpoint
-app.get("/api/service/rust", async (req, res) => {  // Added async
+app.get("/api/service/rust", async (req, res) => {
   try {
-    const response = await axios.get("http://inference-engine:3001/health", {  // FIXED URL
+    const response = await axios.get("http://inference-engine:3001/health", {
       timeout: 5000
     });
     
@@ -135,126 +129,120 @@ app.get("/api/service/rust", async (req, res) => {  // Added async
   }
 });
 
-// Week 1: NEW prediction endpoint (replaces old flow)
 app.post('/api/predict', async (req, res) => {
   const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   
-  console.log(`📥 [${requestId}] Prediction request received`);
+  console.log(`[${requestId}] Prediction request received`);
   
   try {
-    // Step 1: Send to Go service for processing
-    console.log(`   ↪️ [${requestId}] Sending to Go processor...`);
+    await redis.hset(`request:${requestId}`, {
+      status: 'queued',
+      input: JSON.stringify(req.body),
+      user_ip: req.ip,
+      created_at: Date.now(),
+      endpoint: '/api/predict'
+    });
     
-    const goResponse = await axios.post(
-      'http://data-processor:3002/process',
-      {
-        ...req.body,
-        request_id: requestId,
-        timestamp: new Date().toISOString()
-      },
-      {
-        timeout: 10000,
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Request-ID': requestId
-        }
+    await redis.lpush('queue:processing', requestId);
+    
+    console.log(`[${requestId}] Queued for processing`);
+    const timeoutMs = 15000;
+    const start = Date.now();
+    
+    while (Date.now() - start < timeoutMs) {
+      const status = await redis.hget(`request:${requestId}`, 'status');
+    
+      if (status === 'completed') {
+        const result = await redis.hget(`request:${requestId}`, 'result');
+        return res.json({
+          status: 'completed',
+          result: JSON.parse(result)
+        });
       }
-    );
     
-    console.log(`   ✅ [${requestId}] Go processing complete`);
-    
-    // Step 2: Send processed data to Rust for inference
-    console.log(`   ↪️ [${requestId}] Sending to Rust inference...`);
-    
-    const rustResponse = await axios.post(
-      'http://inference-engine:3001/infer',
-      {
-        data: goResponse.data.data || goResponse.data,
-        request_id: requestId
-      },
-      {
-        timeout: 15000,
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Request-ID': requestId
-        }
+      if (status === 'failed') {
+        const error = await redis.hget(`request:${requestId}`, 'error');
+        return res.status(500).json({ status: 'failed', error });
       }
-    );
     
-    console.log(`   ✅ [${requestId}] Rust inference complete`);
-    
-    // Step 3: Return combined response
-    const response = {
-      request_id: requestId,
-      status: 'completed',
-      pipeline: [
-        {
-          service: 'nodejs-gateway',
-          action: 'request_received',
-          timestamp: new Date().toISOString()
-        },
-        {
-          service: 'go-processor',
-          action: goResponse.data.action || 'data_processing',
-          status: goResponse.data.status || 'processed',
-          note: goResponse.data.note || 'Week 1 processing'
-        },
-        {
-          service: 'rust-inference',
-          action: 'ml_prediction',
-          prediction: rustResponse.data.prediction,
-          confidence: rustResponse.data.confidence || 0.85,
-          processing_time_ms: rustResponse.data.processing_time_ms || 100
-        }
-      ],
-      result: rustResponse.data.prediction,
-      confidence: rustResponse.data.confidence || 0.85,
-      total_processing_time_ms: Date.now() - parseInt(requestId.split('_')[1]),
-      note: 'Week 1: Basic pipeline working! 3 languages communicating.',
-      architecture: {
-        languages: ['javascript', 'go', 'rust'],
-        services: 3,
-        flow: 'client → node → go → rust → node → client'
-      }
-    };
-    
-    // Log to Redis
-    try {
-      await redis.lpush('request_logs', JSON.stringify({
-        request_id: requestId,
-        timestamp: new Date().toISOString(),
-        status: 'success',
-        processing_time: response.total_processing_time_ms
-      }));
-      
-      await redis.ltrim('request_logs', 0, 99);
-    } catch (redisError) {
-      console.error('Redis logging error:', redisError.message);
+      await new Promise(resolve => setTimeout(resolve, 500));
     }
     
-    console.log(`   🎉 [${requestId}] Response sent to client`);
-    res.json(response);
+    res.json({
+      status: 'processing',
+      message: 'Still processing, poll later'
+    });
+
+    res.json({
+      request_id: requestId,
+      status: 'queued',
+      message: 'Request accepted for processing',
+      check_status: `/api/requests/${requestId}`,
+      estimated_wait: '2-5 seconds'
+    });
     
   } catch (error) {
-    console.error(`❌ [${requestId}] Error:`, error.message);
+    console.error(`[${requestId}] Queueing error:`, error.message);
     
-    const errorResponse = {
+    res.status(500).json({
       request_id: requestId,
       status: 'error',
-      error: error.message,
-      service: error.config?.url?.includes('data-processor') ? 'go' : 'rust',
-      timestamp: new Date().toISOString(),
-      note: 'Week 1: Basic pipeline - service communication failed'
-    };
-    
-    res.status(500).json(errorResponse);
+      error: 'Failed to queue request',
+      message: error.message
+    });
   }
 });
 
-// Go processing endpoint - KEEP THIS
+
+app.get('/api/requests/:requestId', async (req, res) => {
+  const { requestId } = req.params;
+  
+  try {
+    const requestData = await redis.hgetall(`request:${requestId}`);
+    
+    if (!requestData || Object.keys(requestData).length === 0) {
+      return res.status(404).json({
+        error: 'Request not found',
+        request_id: requestId
+      });
+    }
+    
+    const response = {
+      request_id: requestId,
+      status: requestData.status || 'unknown',
+      created_at: new Date(parseInt(requestData.created_at || Date.now())).toISOString()
+    };
+    
+    if (requestData.status === 'completed' && requestData.result) {
+      response.result = JSON.parse(requestData.result);
+      response.completed_at = new Date(parseInt(requestData.completed_at)).toISOString();
+      response.processing_time_ms = parseInt(requestData.processing_time_ms) || 0;
+    }
+    
+    if (requestData.status === 'failed') {
+      response.error = requestData.error;
+      response.failed_service = requestData.failed_service;
+      response.failed_at = new Date(parseInt(requestData.failed_at)).toISOString();
+    }
+    
+    response.pipeline = {
+      go: requestData.go_status || 'pending',
+      rust: requestData.rust_status || 'pending'
+    };
+    
+    res.json(response);
+    
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to fetch request status',
+      message: error.message
+    });
+  }
+});
+
 app.post('/api/process', async (req, res) => {
   try {
-    console.log('📤 Sending data to Go processor...');
+    console.log('Sending data to Go processor');
     
     const response = await axios.post(
       'http://data-processor:3002/process',
@@ -280,7 +268,7 @@ app.post('/api/process', async (req, res) => {
     });
     
   } catch (error) {
-    console.error('❌ Processing error:', error.message);
+    console.error('Processing error:', error.message);
     
     res.status(500).json({
       error: 'Data processing service unavailable',
@@ -289,7 +277,6 @@ app.post('/api/process', async (req, res) => {
   }
 });
 
-// Service status endpoint - GOOD
 app.get('/api/services/status', async (req, res) => {
   const services = {
     redis: { status: 'checking' },
@@ -306,7 +293,7 @@ app.get('/api/services/status', async (req, res) => {
   }
   
   try {
-    const rustResponse = await axios.get('http://localhost:3001/health', {
+    const rustResponse = await axios.get('http://inference-engine:3001/health', {
       timeout: 5000
     });
     services.rust = { status: 'healthy', ...rustResponse.data };
@@ -335,10 +322,4 @@ app.get('/api/services/status', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`API Gateway running on port ${PORT}`);
   console.log(`Redis URL: ${process.env.REDIS_URL || 'redis://redis:6379'}`);
-  console.log('Available endpoints:');
-  console.log('   GET  /health');
-  console.log('   GET  /test-redis');
-  console.log('   POST /api/predict    ← Week 1 main endpoint');
-  console.log('   POST /api/process');
-  console.log('   GET  /api/services/status');
 });
