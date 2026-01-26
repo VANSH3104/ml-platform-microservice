@@ -3,10 +3,11 @@ use chrono::Utc;
 use redis::Client;
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
-
+mod worker;
+use worker::*;
 #[derive(Deserialize)]
 struct InferenceRequest {
-    data: serde_json::Value,  // Changed to accept any JSON
+    data: serde_json::Value,
     request_id: Option<String>,
 }
 
@@ -14,7 +15,7 @@ struct InferenceRequest {
 struct InferenceResponse {
     status: String,
     service: String,
-    prediction: serde_json::Value,  // Changed to JSON value
+    prediction: serde_json::Value,
     confidence: f32,
     processing_time_ms: u128,
     request_id: Option<String>,
@@ -106,7 +107,9 @@ async fn main() -> std::io::Result<()> {
     println!("   GET  http://localhost:3001/health");
     println!("   GET  http://localhost:3001/test-redis");
     println!("   POST http://localhost:3001/infer");
-
+    if let Err(e) = start_processing_loop().await {
+            eprintln!("Worker error: {}", e);
+        }
     HttpServer::new(|| {
         App::new()
             .route("/health", web::get().to(health_check))

@@ -73,11 +73,13 @@ func processJob(rdb *redis.Client, requestId string) {
 
 	rdb.HSet(ctx, "request:"+requestId, map[string]interface{}{
 		"go_status": "completed",
-		"status":    "completed",
+		"status":    "Processed",
 		"result":    string(resultBytes),
 		"go_result": string(resultBytes),
 		"go_time":   time.Now().Unix(),
 	})
+
+	rdb.RPush(ctx, "queue:rust_inference", requestId)
 }
 
 func failJob(rdb *redis.Client, requestId, reason string) {
